@@ -80,10 +80,10 @@ ExecStart=/usr/bin/python3 /opt/redcore-proxy/redcore_proxy.py refresh --quiet
 EOF
 cat >/etc/systemd/system/redcore-proxy-refresh.timer <<'EOF'
 [Unit]
-Description=Run RedCore-Proxy ping test every 5 minutes
+Description=Run RedCore-Proxy ping test every minute
 [Timer]
 OnBootSec=90s
-OnUnitActiveSec=5min
+OnUnitActiveSec=1min
 Persistent=true
 Unit=redcore-proxy-refresh.service
 [Install]

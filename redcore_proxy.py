@@ -144,7 +144,22 @@ def stream_settings(query: dict[str, str]) -> dict[str, Any]:
         result['network'] = 'httpupgrade'
         result['httpupgradeSettings'] = {'path': path or '/', 'host': host}
     elif network == 'xhttp':
-        result['xhttpSettings'] = {'path': path or '/', 'host': host}
+        # XHTTP links frequently carry `mode` and a JSON `extra` object.
+        # `extra` is not cosmetic: it can contain XPadding/xmux/header values
+        # required by the upstream.  Dropping it produces a valid Xray config
+        # that nevertheless cannot connect to many modern -x subscriptions.
+        xhttp: dict[str, Any] = {'path': path or '/', 'host': host, 'mode': query.get('mode', 'auto') or 'auto'}
+        if query.get('extra'):
+            try:
+                extra = json.loads(query['extra'])
+                if isinstance(extra, dict):
+                    xhttp['extra'] = extra
+            except json.JSONDecodeError:
+                pass
+        # A few publishers send this single XHTTP value outside `extra`.
+        if query.get('x_padding_bytes'):
+            xhttp.setdefault('extra', {})['xPaddingBytes'] = query['x_padding_bytes']
+        result['xhttpSettings'] = xhttp
     elif network == 'http':
         result['httpSettings'] = {'path': path or '/', 'host': [host] if host else []}
     if result['security'] == 'tls':
