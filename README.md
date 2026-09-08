@@ -64,23 +64,30 @@ GitHub: https://github.com/RedBoy-011/RedSocKs5-NordVPN
 
 ### راه‌اندازی با منوی تعاملی
 
-برای واردکردن Service Credentials، انتخاب پنج کشور و تعیین پورت‌های ثابت:
+برای واردکردن Service Credentials، انتخاب کشورها و تعیین پورت‌های ثابت:
 
 ```bash
 chmod +x RedSocKs5
 ./RedSocKs5
 ```
 
-منو در ابتدا حالت احراز هویت را می‌پرسد: Token برای CLI رسمی NordVPN یا Service Credentials برای چند SOCKS مستقل. حالت Token فقط یک مسیر VPN فعال دارد؛ برای چند لوکیشن هم‌زمان باید حالت Service Credentials را انتخاب کنید. در حالت چند SOCKS، برای هر پورت کشورها به‌ترتیب امتحان می‌شوند و اسکریپت با اولین تونل سالم ادامه می‌دهد؛ اگر کشوری قطع باشد، فرایند متوقف نمی‌شود. در پایان کشور نهایی هر پورت و تعداد تونل‌های سالم نمایش داده می‌شود.
+منوی اصلی شامل این گزینه‌ها است:
+
+```text
+1) Token: اتصال رسمی NordVPN CLI با یک مسیر VPN فعال
+2) Service credentials: ساخت چند SOCKS مستقل
+3) Update project from GitHub: دریافت آخرین کد بدون پاک‌کردن .env
+4) Repair one SOCKS port: تست و جایگزینی کشور فقط برای یک پورت خراب
+5) Show service status: نمایش وضعیت فعلی کانتینرها
+```
+
+در حالت چند SOCKS، برای هر پورت کشورها به‌ترتیب امتحان می‌شوند و اسکریپت با اولین تونل سالم ادامه می‌دهد؛ اگر کشوری قطع باشد، فرایند متوقف نمی‌شود. در پایان کشور نهایی هر پورت و تعداد تونل‌های سالم نمایش داده می‌شود.
 
 ```bash
 git clone https://github.com/RedBoy-011/RedSocKs5-NordVPN.git RedSocKs5-NordVPN
 cd RedSocKs5-NordVPN
-cp .env.example .env
-nano .env
-docker compose pull
-docker compose up -d
-docker compose ps
+chmod +x RedSocKs5
+sudo ./RedSocKs5
 ```
 
 ### نصب تک‌خطی

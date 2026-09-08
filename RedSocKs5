@@ -5,12 +5,14 @@ echo '=== RedSocKs5-NordVPN ==='
 if [[ "${EUID}" -ne 0 ]]; then echo 'Please run as root: sudo ./RedSocKs5'; exit 1; fi
 source /etc/os-release
 case "${ID:-}" in ubuntu|debian) ;; *) echo "Unsupported OS: ${ID:-unknown}. Ubuntu/Debian required."; exit 1;; esac
-apt-get update -y
-apt-get install -y ca-certificates curl sudo
+
+refresh_apt() { apt-get update -y; }
 
 install_nordvpn_cli() {
   if ! command -v nordvpn >/dev/null 2>&1; then
     echo 'Installing official NordVPN Linux CLI...'
+    refresh_apt
+    apt-get install -y ca-certificates curl
     sh <(curl -fsSL https://downloads.nordcdn.com/apps/linux/install.sh)
   fi
   systemctl enable --now nordvpnd 2>/dev/null || true
@@ -19,23 +21,33 @@ install_nordvpn_cli() {
 install_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     echo 'Installing Docker Engine and Compose plugin...'
+    refresh_apt
     apt-get install -y docker.io docker-compose-plugin
     systemctl enable --now docker
   elif ! docker compose version >/dev/null 2>&1; then
+    refresh_apt
     apt-get install -y docker-compose-plugin
   fi
   modprobe tun 2>/dev/null || true
 }
 
 update_project() {
-  command -v git >/dev/null 2>&1 || apt-get install -y git
+  if ! command -v git >/dev/null 2>&1; then refresh_apt; apt-get install -y git; fi
   [[ -d "$PROJECT_DIR/.git" ]] || { echo 'This copy is not a Git clone.'; exit 1; }
   cd "$PROJECT_DIR"
   if ! git diff --quiet || ! git diff --cached --quiet; then
     git stash push -m "RedSocKs5 menu backup $(date +%Y%m%d-%H%M%S)" || true
   fi
+  local running_services=''
+  if command -v docker >/dev/null 2>&1 && [[ -f .env ]]; then
+    running_services=$(docker compose ps --services --status running 2>/dev/null || true)
+  fi
   git pull --ff-only origin main
   chmod +x RedSocKs5 repair-port.sh 2>/dev/null || true
+  if [[ -n "$running_services" ]]; then
+    echo 'Applying updated compose configuration to active services...'
+    docker compose up -d --force-recreate $running_services
+  fi
   echo 'Update completed. Restarting menu...'
   exec bash "$PROJECT_DIR/RedSocKs5"
 }
@@ -43,8 +55,20 @@ update_project() {
 echo '1) Token (official NordVPN CLI: one active system-wide location)'
 echo '2) Service credentials (multi-location Docker/SOCKS5)'
 echo '3) Update project from GitHub'
-read -rp 'Select [1/2/3]: ' mode
+echo '4) Repair one SOCKS port'
+echo '5) Show service status'
+read -rp 'Select [1/2/3/4/5]: ' mode
 [[ "${mode:-}" == "3" ]] && update_project
+if [[ "${mode:-}" == "4" ]]; then
+  [[ -f "$PROJECT_DIR/repair-port.sh" ]] || { echo 'repair-port.sh is missing. Select option 3 first.'; exit 1; }
+  read -rp 'SOCKS port to repair [1081-1087]: ' repair_port
+  exec bash "$PROJECT_DIR/repair-port.sh" "$repair_port"
+fi
+if [[ "${mode:-}" == "5" ]]; then
+  cd "$PROJECT_DIR"
+  docker compose ps
+  exit 0
+fi
 if [[ "${mode:-1}" == "1" ]]; then
   install_nordvpn_cli
   read -rsp 'NordVPN access token: ' token; echo
