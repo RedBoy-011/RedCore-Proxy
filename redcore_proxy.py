@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import json
 import logging
+import re
 import socket
 import ssl
 import subprocess
@@ -76,6 +78,39 @@ def subscriptions() -> list[Subscription]:
     return result
 
 
+def download_provider_file(sub: Subscription) -> tuple[bool, str]:
+    """Fetch subscription ourselves so URL-safe Base64 is normalized before Mihomo reads it."""
+    try:
+        request = urllib.request.Request(sub.url, headers={'User-Agent': 'RedCore-Proxy/4.0'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            content = response.read().decode('utf-8', errors='replace').strip()
+        compact = re.sub(r'\s+', '', content)
+        if '://' not in compact:
+            try:
+                normalized = compact.replace('-', '+').replace('_', '/')
+                decoded = base64.b64decode(normalized + '=' * (-len(normalized) % 4)).decode('utf-8')
+                if '://' in decoded or 'proxies:' in decoded:
+                    content = decoded
+            except (ValueError, UnicodeDecodeError):
+                pass
+        target = PROVIDERS / f'{sub.provider}.txt'
+        write_text(target, content.strip() + '\n')
+        node_count = len(re.findall(r'(?im)^(?:vless|trojan|vmess|ss|hysteria2|hy2|tuic)://', content))
+        return True, f'{node_count} URI detected'
+    except (urllib.error.URLError, TimeoutError, OSError) as error:
+        return False, str(error)
+
+
+def prepare_provider_files(subs: list[Subscription]) -> dict[str, str]:
+    results: dict[str, str] = {}
+    for sub in subs:
+        ok, message = download_provider_file(sub)
+        results[sub.name] = message if ok else f'ERROR: {message}'
+        if not ok:
+            logging.warning('%s: %s', sub.name, message)
+    return results
+
+
 def make_config(subs: list[Subscription], selected: list[str] | None = None) -> str:
     """Build one Mihomo config. selected=None is test mode; selected list creates listeners."""
     lines = [
@@ -94,10 +129,8 @@ def make_config(subs: list[Subscription], selected: list[str] | None = None) -> 
         prefix = f'{sub.provider}::'
         lines += [
             f'  {sub.provider}:',
-            '    type: http',
-            f'    url: {yaml_quote(sub.url)}',
-            f'    path: {yaml_quote(str(PROVIDERS / (sub.provider + ".yaml")))}',
-            '    interval: 1800',
+            '    type: file',
+            f'    path: {yaml_quote(str(PROVIDERS / (sub.provider + ".txt")))}',
             '    health-check:',
             '      enable: true',
             f'      url: {yaml_quote(TEST_URL)}',
@@ -158,18 +191,25 @@ def restart_mihomo(subs: list[Subscription], selected: list[str] | None = None) 
     raise RuntimeError('API محلی Mihomo در دسترس نشد')
 
 
-def group_members() -> list[str]:
-    """Wait for provider download; TITAN_ALL contains only provider proxies."""
+def provider_members(subs: list[Subscription]) -> list[str]:
+    """Read actual provider proxies, never group placeholders such as COMPATIBLE."""
     deadline = time.monotonic() + 45
     last: list[str] = []
     while time.monotonic() < deadline:
         try:
-            data = api('/proxies/' + urllib.parse.quote('TITAN_ALL', safe=''))
-            values = data.get('all', [])
-            if isinstance(values, list):
-                last = [item for item in values if isinstance(item, str)]
-                if last:
-                    return last
+            data = api('/providers/proxies')
+            providers = data.get('providers', data)
+            values: list[str] = []
+            for sub in subs:
+                entry = providers.get(sub.provider, {}) if isinstance(providers, dict) else {}
+                proxies = entry.get('proxies', []) if isinstance(entry, dict) else []
+                for proxy in proxies:
+                    name = proxy.get('name') if isinstance(proxy, dict) else proxy
+                    if isinstance(name, str) and name not in {'DIRECT', 'REJECT', 'REJECT-DROP', 'COMPATIBLE'}:
+                        values.append(name)
+            last = values
+            if last:
+                return last
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             pass
         time.sleep(1)
@@ -247,12 +287,13 @@ def test_subs() -> int:
     if not subs:
         print('هیچ سابی ثبت نشده است.')
         return 1
+    fetched = prepare_provider_files(subs)
     restart_mihomo(subs)
-    names = group_members()
+    names = provider_members(subs)
     print('--- نتیجهٔ بارگذاری Mihomo ---')
     for sub in subs:
         count = sum(item.startswith(sub.provider + '::') for item in names)
-        print(f'✓ {sub.name}: {count} نود توسط Mihomo بارگذاری شد')
+        print(f"{'✓' if count else '✗'} {sub.name}: {count} نود توسط Mihomo بارگذاری شد | دانلود: {fetched[sub.name]}")
     print(f'جمع کل: {len(names)} نود')
     return 0 if names else 1
 
@@ -264,10 +305,11 @@ def refresh(quiet: bool = False) -> int:
         if not quiet:
             print('هیچ سابی ثبت نشده است.')
         return 0
+    fetched = prepare_provider_files(subs)
     if not quiet:
         print('--- مرحله ۱: دریافت Subscriptionها با Mihomo ---')
     restart_mihomo(subs)
-    names = group_members()
+    names = provider_members(subs)
     if not names:
         write_json(SANAEI, [])
         write_json(STATUS, {'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'loaded': 0, 'selected': [], 'error': 'هیچ نودی از providerها بارگذاری نشد'})
@@ -312,7 +354,7 @@ def refresh(quiet: bool = False) -> int:
     else:
         subprocess.run(['systemctl', 'stop', 'titan-mihomo.service'], check=False)
     write_json(SANAEI, sanaei_json(len(final_names)))
-    report = {'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'loaded': len(names), 'api_healthy': len(tested), 'selected': results, 'subscriptions': [{'name': s.name, 'url': s.url, 'loaded': sum(n.startswith(s.provider + "::") for n in names)} for s in subs]}
+    report = {'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'loaded': len(names), 'api_healthy': len(tested), 'selected': results, 'subscriptions': [{'name': s.name, 'url': s.url, 'download': fetched[s.name], 'loaded': sum(n.startswith(s.provider + "::") for n in names)} for s in subs]}
     write_json(STATUS, report)
     if not quiet:
         print('--- نتیجهٔ نهایی ---')
