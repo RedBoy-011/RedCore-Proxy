@@ -7,7 +7,7 @@ SUBS=/etc/titan/subs.txt
 root() { [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo 'با sudo اجرا کنید.' >&2; exit 1; }; }
 run() { root; python3 "$CORE" "$@"; }
 pause() { read -r -p 'برای ادامه Enter را بزنید…' _; }
-list_subs() { root; echo '--- ساب‌ها ---'; nl -ba "$SUBS" 2>/dev/null || true; }
+list_subs() { root; echo '--- ساب‌ها (نام | لینک) ---'; nl -ba "$SUBS" 2>/dev/null || true; }
 add_sub() {
   root
   read -r -p 'نام ساب: ' name
@@ -18,31 +18,32 @@ add_sub() {
   chmod 600 "$SUBS"
   echo 'ساب ذخیره شد.'
 }
-remove_sub() { root; list_subs; read -r -p 'شمارهٔ خط برای حذف: ' n; [[ "$n" =~ ^[0-9]+$ ]] && sed -i "${n}d" "$SUBS"; }
+remove_sub() { root; list_subs; read -r -p 'شماره خط برای حذف: ' n; [[ "$n" =~ ^[0-9]+$ ]] && sed -i "${n}d" "$SUBS" && echo 'حذف شد.'; }
+
 menu() {
   while true; do
     clear
     cat <<'EOF'
-╔══════════════════════════════════════════════╗
-║               RedCore-Proxy                   ║
-╠══════════════════════════════════════════════╣
-║ 1) افزودن ساب                                ║
-║ 2) حذف ساب                                   ║
-║ 3) نمایش ساب‌ها                              ║
-║ 4) تست دریافت و پارس ساب‌ها                  ║
-║ 5) تست واقعی، سورت و ساخت SOCKSهای داخلی     ║
-║ 6) گزارش ۸ نود نهایی                         ║
-║ 7) نمایش JSON آمادهٔ ثنایی                    ║
-║ 8) تست یک پورت SOCKS                         ║
-║ 9) لاگ زنده                                  ║
-║ 0) خروج                                      ║
-╚══════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════╗
+║          RedCore-Proxy — Mihomo / Clash Meta        ║
+╠════════════════════════════════════════════════════╣
+║ 1) افزودن ساب                                      ║
+║ 2) حذف ساب                                         ║
+║ 3) نمایش ساب‌ها                                    ║
+║ 4) تست دریافت و بارگذاری ساب در Mihomo             ║
+║ 5) تست واقعی، سورت و ساخت 8 SOCKS داخلی             ║
+║ 6) گزارش نودهای نهایی                              ║
+║ 7) نمایش JSON آمادهٔ ثنایی                          ║
+║ 8) تست مستقل یک پورت SOCKS                          ║
+║ 9) لاگ زنده                                         ║
+║ 0) خروج                                             ║
+╚════════════════════════════════════════════════════╝
 EOF
     read -r -p 'انتخاب: ' c
     case "$c" in
       1) add_sub; pause;; 2) remove_sub; pause;; 3) list_subs; pause;;
       4) run test-subs; pause;; 5) run refresh; pause;; 6) run status; pause;;
-      7) run json; pause;; 8) read -r -p 'پورت (مثلاً 10801): ' p; run socks-test "${p:-10801}"; pause;;
+      7) run json; pause;; 8) read -r -p 'پورت (مثال 10801): ' p; run socks-test "${p:-10801}"; pause;;
       9) journalctl -fu titan-refresh.service || true;; 0) exit 0;;
       *) echo 'گزینه نامعتبر است.'; sleep 1;;
     esac

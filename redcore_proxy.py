@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""RedCore-Proxy: real end-to-end subscription tester for local SOCKS outputs."""
+"""RedCore-Proxy Mihomo controller: provider loading, real delay tests and SOCKS outputs."""
 from __future__ import annotations
 
 import argparse
-import base64
 import concurrent.futures
 import json
 import logging
-import re
-import shutil
 import socket
 import ssl
 import subprocess
@@ -23,31 +20,18 @@ from pathlib import Path
 from typing import Any
 
 ETC = Path('/etc/titan')
-SUBS, XRAY, SANAEI, STATUS = ETC/'subs.txt', ETC/'xray.json', ETC/'sanaei.json', ETC/'status.json'
-LOG = Path('/var/log/titan/refresh.log')
+SUBS, CONFIG, SANAEI, STATUS = ETC/'subs.txt', ETC/'mihomo.yaml', ETC/'sanaei.json', ETC/'status.json'
+PROVIDERS, LOG = ETC/'providers', Path('/var/log/titan/refresh.log')
+API = 'http://127.0.0.1:19090'
 PORT_BASE, MAX_NODES = 10801, 8
-TCP_TIMEOUT, REAL_TIMEOUT = 3.5, 12.0
-TEST_HOST, TEST_PORT = 'example.com', 443
+TEST_URL, TIMEOUT = 'https://www.gstatic.com/generate_204', 12
 
 
 @dataclass(frozen=True)
 class Subscription:
     name: str
     url: str
-
-
-@dataclass(frozen=True)
-class Node:
-    protocol: str
-    address: str
-    port: int
-    user: dict[str, Any]
-    stream: dict[str, Any]
-    name: str
-    source: str
-
-    def key(self) -> str:
-        return json.dumps([self.protocol, self.address, self.port, self.user, self.stream], sort_keys=True)
+    provider: str
 
 
 def setup_log() -> None:
@@ -55,254 +39,179 @@ def setup_log() -> None:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s', handlers=[logging.FileHandler(LOG), logging.StreamHandler()])
 
 
-def write_json(path: Path, payload: Any) -> None:
+def yaml_quote(value: str) -> str:
+    """JSON strings are valid YAML strings and safely preserve Persian and URL characters."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=path.parent, delete=False) as out:
-        json.dump(payload, out, ensure_ascii=False, indent=2)
-        out.write('\n')
+        out.write(content)
         temp = Path(out.name)
     temp.replace(path)
 
 
+def write_json(path: Path, data: Any) -> None:
+    write_text(path, json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+
+
 def subscriptions() -> list[Subscription]:
     ETC.mkdir(parents=True, exist_ok=True)
+    PROVIDERS.mkdir(parents=True, exist_ok=True)
     SUBS.touch(mode=0o600, exist_ok=True)
     result: list[Subscription] = []
-    for line_no, raw in enumerate(SUBS.read_text(encoding='utf-8').splitlines(), 1):
-        raw = raw.strip()
+    for index, line in enumerate(SUBS.read_text(encoding='utf-8').splitlines(), 1):
+        raw = line.strip()
         if not raw or raw.startswith('#'):
             continue
         if '|' in raw:
             name, url = (part.strip() for part in raw.split('|', 1))
         else:
-            url = raw
-            name = f'ساب {line_no} ({urllib.parse.urlparse(url).netloc or "بدون‌نام"})'
-        if url.startswith(('https://', 'http://')):
-            result.append(Subscription(name or f'ساب {line_no}', url))
-        else:
-            logging.warning('خط نامعتبر ساب: %s', raw)
-    return result
-
-
-def jsdelivr(url: str) -> str:
-    parsed = urllib.parse.urlparse(url)
-    parts = parsed.path.strip('/').split('/')
-    if parsed.netloc == 'raw.githubusercontent.com' and len(parts) >= 4:
-        return f'https://cdn.jsdelivr.net/gh/{parts[0]}/{parts[1]}@{parts[2]}/' + '/'.join(parts[3:])
-    if parsed.netloc in {'github.com', 'www.github.com'} and len(parts) >= 5 and parts[2] in {'blob', 'raw'}:
-        return f'https://cdn.jsdelivr.net/gh/{parts[0]}/{parts[1]}@{parts[3]}/' + '/'.join(parts[4:])
-    return url
-
-
-def fetch(url: str) -> str:
-    request = urllib.request.Request(jsdelivr(url), headers={'User-Agent': 'RedCore-Proxy/3.0'})
-    with urllib.request.urlopen(request, timeout=25) as response:
-        return response.read().decode('utf-8', errors='replace').strip()
-
-
-def decode_subscription(text: str) -> str:
-    compact = re.sub(r'\s+', '', text)
-    if '://' in compact:
-        return text
-    try:
-        decoded = base64.b64decode(compact + '=' * (-len(compact) % 4), validate=True).decode('utf-8')
-        return decoded if '://' in decoded else text
-    except (ValueError, UnicodeDecodeError):
-        return text
-
-
-def first(query: dict[str, list[str]], key: str, default: str = '') -> str:
-    return query.get(key, [default])[0]
-
-
-def bool_value(value: str) -> bool:
-    return value.lower() in {'1', 'true', 'yes', 'on'}
-
-
-def stream_config(network: str, security: str, query: dict[str, list[str]]) -> dict[str, Any]:
-    network = network or 'tcp'
-    security = security or 'none'
-    output: dict[str, Any] = {'network': network, 'security': security}
-    host, path = first(query, 'host'), first(query, 'path', '/')
-    if network == 'ws':
-        output['wsSettings'] = {'path': path, 'headers': {'Host': host} if host else {}}
-    elif network == 'grpc':
-        output['grpcSettings'] = {'serviceName': first(query, 'serviceName')}
-    elif network == 'httpupgrade':
-        output['httpupgradeSettings'] = {'path': path, 'host': host}
-    elif network == 'xhttp':
-        xhttp: dict[str, Any] = {'path': path, 'host': host}
-        mode = first(query, 'mode')
-        if mode:
-            xhttp['mode'] = mode
-        extra = first(query, 'extra')
-        if extra:
-            try:
-                decoded_extra = json.loads(extra)
-                if isinstance(decoded_extra, dict):
-                    xhttp.update(decoded_extra)
-            except json.JSONDecodeError:
-                pass
-        output['xhttpSettings'] = xhttp
-    sni = first(query, 'sni') or host
-    fp = first(query, 'fp')
-    if security == 'tls':
-        tls: dict[str, Any] = {'serverName': sni, 'allowInsecure': bool_value(first(query, 'allowInsecure'))}
-        if fp:
-            tls['fingerprint'] = fp
-        alpn = [x for x in first(query, 'alpn').split(',') if x]
-        if alpn:
-            tls['alpn'] = alpn
-        output['tlsSettings'] = tls
-    elif security == 'reality':
-        reality: dict[str, Any] = {'serverName': sni, 'publicKey': first(query, 'pbk'), 'shortId': first(query, 'sid')}
-        if fp:
-            reality['fingerprint'] = fp
-        if first(query, 'spx'):
-            reality['spiderX'] = first(query, 'spx')
-        output['realitySettings'] = reality
-    return output
-
-
-def parse_vless_or_trojan(uri: str, source: str) -> Node | None:
-    parsed = urllib.parse.urlparse(uri)
-    if parsed.scheme not in {'vless', 'trojan'} or not parsed.hostname or not parsed.port or not parsed.username:
-        return None
-    query = urllib.parse.parse_qs(parsed.query)
-    if parsed.scheme == 'vless':
-        user: dict[str, Any] = {'id': urllib.parse.unquote(parsed.username), 'encryption': first(query, 'encryption', 'none')}
-        if first(query, 'flow'):
-            user['flow'] = first(query, 'flow')
-        security = first(query, 'security', 'none')
-    else:
-        user = {'password': urllib.parse.unquote(parsed.username)}
-        security = first(query, 'security', 'tls')
-    return Node(parsed.scheme, parsed.hostname, parsed.port, user, stream_config(first(query, 'type', 'tcp'), security, query), urllib.parse.unquote(parsed.fragment) or f'{parsed.scheme}-{parsed.hostname}', source)
-
-
-def parse_vmess(uri: str, source: str) -> Node | None:
-    try:
-        body = uri.split('://', 1)[1]
-        data = json.loads(base64.b64decode(body + '=' * (-len(body) % 4)).decode('utf-8'))
-        query = {
-            'host': [str(data.get('host', ''))], 'path': [str(data.get('path', '/'))],
-            'sni': [str(data.get('sni', data.get('servername', '')))], 'fp': [str(data.get('fp', ''))],
-            'pbk': [str(data.get('pbk', ''))], 'sid': [str(data.get('sid', ''))], 'serviceName': [str(data.get('path', ''))],
-        }
-        user = {'id': str(data['id']), 'alterId': int(data.get('aid', 0)), 'security': str(data.get('scy', 'auto'))}
-        return Node('vmess', str(data['add']), int(data['port']), user, stream_config(str(data.get('net', 'tcp')), str(data.get('tls', 'none')), query), str(data.get('ps', 'vmess-node')), source)
-    except (KeyError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-        return None
-
-
-def parse_shadowsocks(uri: str, source: str) -> Node | None:
-    try:
-        parsed = urllib.parse.urlparse(uri)
-        fragment = urllib.parse.unquote(parsed.fragment) or 'shadowsocks-node'
-        if parsed.hostname and parsed.port and parsed.username:
-            credential = urllib.parse.unquote(parsed.username)
-        else:
-            raw = uri.split('://', 1)[1].split('#', 1)[0].split('?', 1)[0]
-            encoded, host_port = raw.rsplit('@', 1)
-            credential = base64.b64decode(encoded + '=' * (-len(encoded) % 4)).decode('utf-8')
-            host, port = host_port.rsplit(':', 1)
-            parsed = urllib.parse.urlparse(f'//{host}:{port}')
-        method, password = credential.split(':', 1)
-        return Node('shadowsocks', parsed.hostname or '', parsed.port or 0, {'method': method, 'password': password}, {}, fragment, source)
-    except (ValueError, UnicodeDecodeError):
-        return None
-
-
-def extract_nodes(text: str, source: str) -> tuple[list[Node], dict[str, int]]:
-    decoded = decode_subscription(text)
-    links = re.findall(r'(?:[A-Za-z0-9+.-]+)://[^\s]+', decoded)
-    nodes: dict[str, Node] = {}
-    unsupported: dict[str, int] = {}
-    for uri in links:
-        scheme = uri.split('://', 1)[0].lower()
-        node: Node | None
-        if scheme in {'vless', 'trojan'}:
-            node = parse_vless_or_trojan(uri, source)
-        elif scheme == 'vmess':
-            node = parse_vmess(uri, source)
-        elif scheme == 'ss':
-            node = parse_shadowsocks(uri, source)
-        else:
-            unsupported[scheme] = unsupported.get(scheme, 0) + 1
+            name, url = f'ساب {index}', raw
+        if not url.startswith(('https://', 'http://')):
+            logging.warning('لینک نامعتبر: %s', raw)
             continue
-        if node:
-            nodes.setdefault(node.key(), node)
-    return list(nodes.values()), unsupported
-
-
-def load_subscription(sub: Subscription) -> tuple[Subscription, list[Node], dict[str, int], str | None]:
-    try:
-        nodes, unsupported = extract_nodes(fetch(sub.url), sub.name)
-        return sub, nodes, unsupported, None
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as error:
-        return sub, [], {}, str(error)
-
-
-def tcp_probe(node: Node) -> tuple[Node, float | None]:
-    started = time.perf_counter()
-    try:
-        with socket.create_connection((node.address, node.port), timeout=TCP_TIMEOUT):
-            return node, round((time.perf_counter() - started) * 1000, 1)
-    except OSError:
-        return node, None
-
-
-def outbound(node: Node, tag: str) -> dict[str, Any]:
-    if node.protocol == 'trojan':
-        settings = {'servers': [{'address': node.address, 'port': node.port, 'password': node.user['password']}]}
-    elif node.protocol == 'shadowsocks':
-        settings = {'servers': [{'address': node.address, 'port': node.port, 'method': node.user['method'], 'password': node.user['password']}]}
-    else:
-        settings = {'vnext': [{'address': node.address, 'port': node.port, 'users': [node.user]}]}
-    result = {'tag': tag, 'protocol': node.protocol, 'settings': settings}
-    if node.stream:
-        result['streamSettings'] = node.stream
+        result.append(Subscription(name or f'ساب {index}', url, f'titan-provider-{index}'))
     return result
 
 
-def xray_config(nodes: list[Node]) -> dict[str, Any]:
-    inbounds, outbounds, rules = [], [{'tag': 'direct', 'protocol': 'freedom'}], []
-    for index, node in enumerate(nodes, 1):
-        inbound_tag, outbound_tag = f'titan-in-{index}', f'titan-out-{index}'
-        inbounds.append({'tag': inbound_tag, 'listen': '127.0.0.1', 'port': PORT_BASE + index - 1, 'protocol': 'socks', 'settings': {'auth': 'noauth', 'udp': True}})
-        outbounds.append(outbound(node, outbound_tag))
-        rules.append({'type': 'field', 'inboundTag': [inbound_tag], 'outboundTag': outbound_tag})
-    return {'log': {'loglevel': 'warning'}, 'inbounds': inbounds, 'outbounds': outbounds, 'routing': {'rules': rules}}
+def make_config(subs: list[Subscription], selected: list[str] | None = None) -> str:
+    """Build one Mihomo config. selected=None is test mode; selected list creates listeners."""
+    lines = [
+        'allow-lan: false',
+        'mode: rule',
+        'log-level: warning',
+        'external-controller: 127.0.0.1:19090',
+        'external-ui: ""',
+        'ipv6: true',
+        'profile:',
+        '  store-selected: false',
+        '  store-fake-ip: false',
+        'proxy-providers:',
+    ]
+    for sub in subs:
+        prefix = f'{sub.provider}::'
+        lines += [
+            f'  {sub.provider}:',
+            '    type: http',
+            f'    url: {yaml_quote(sub.url)}',
+            f'    path: {yaml_quote(str(PROVIDERS / (sub.provider + ".yaml")))}',
+            '    interval: 1800',
+            '    health-check:',
+            '      enable: true',
+            f'      url: {yaml_quote(TEST_URL)}',
+            '      interval: 600',
+            '      timeout: 12000',
+            '      lazy: false',
+            '    override:',
+            f'      additional-prefix: {yaml_quote(prefix)}',
+        ]
+    lines += ['proxy-groups:', '  - name: TITAN_ALL', '    type: select', '    use:']
+    lines += [f'      - {sub.provider}' for sub in subs]
+
+    if selected:
+        for index, proxy in enumerate(selected, 1):
+            lines += [
+                f'  - name: TITAN_PIN_{index}',
+                '    type: select',
+                '    proxies:',
+                f'      - {yaml_quote(proxy)}',
+            ]
+    lines += ['listeners:' if selected else 'listeners: []']
+    if selected:
+        for index, _proxy in enumerate(selected, 1):
+            lines += [
+                f'  - name: titan-socks-{index}',
+                '    type: socks',
+                '    listen: 127.0.0.1',
+                f'    port: {PORT_BASE + index - 1}',
+                '    udp: true',
+                '    users: []',
+            ]
+    lines += ['rules:']
+    if selected:
+        lines += [f'  - IN-NAME,titan-socks-{index},TITAN_PIN_{index}' for index in range(1, len(selected) + 1)]
+    lines += ['  - MATCH,TITAN_ALL']
+    return '\n'.join(lines) + '\n'
 
 
-def sanaei_config(count: int) -> list[dict[str, Any]]:
-    return [{'tag': f'Socks_{index}_titan', 'protocol': 'socks', 'settings': {'servers': [{'address': '127.0.0.1', 'port': PORT_BASE + index - 1, 'users': []}]}} for index in range(1, count + 1)]
+def api(path: str, timeout: int = 8) -> dict[str, Any]:
+    request = urllib.request.Request(API + path, headers={'Accept': 'application/json'})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode('utf-8'))
 
 
-def recv_exact(sock: socket.socket, size: int) -> bytes:
+def restart_mihomo(subs: list[Subscription], selected: list[str] | None = None) -> None:
+    write_text(CONFIG, make_config(subs, selected))
+    check = subprocess.run(['/usr/local/bin/mihomo', '-d', str(ETC), '-f', str(CONFIG), '-t'], capture_output=True, text=True)
+    if check.returncode:
+        raise RuntimeError(check.stderr.strip() or check.stdout.strip() or 'کانفیگ Mihomo نامعتبر است')
+    subprocess.run(['systemctl', 'restart', 'titan-mihomo.service'], check=True)
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        try:
+            api('/version', timeout=2)
+            return
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            time.sleep(0.5)
+    raise RuntimeError('API محلی Mihomo در دسترس نشد')
+
+
+def group_members() -> list[str]:
+    """Wait for provider download; TITAN_ALL contains only provider proxies."""
+    deadline = time.monotonic() + 45
+    last: list[str] = []
+    while time.monotonic() < deadline:
+        try:
+            data = api('/proxies/' + urllib.parse.quote('TITAN_ALL', safe=''))
+            values = data.get('all', [])
+            if isinstance(values, list):
+                last = [item for item in values if isinstance(item, str)]
+                if last:
+                    return last
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            pass
+        time.sleep(1)
+    return last
+
+
+def delay(proxy: str) -> tuple[str, int | None, str | None]:
+    path = '/proxies/' + urllib.parse.quote(proxy, safe='') + '/delay?' + urllib.parse.urlencode({'timeout': TIMEOUT * 1000, 'url': TEST_URL, 'expected': 204})
+    try:
+        data = api(path, timeout=TIMEOUT + 5)
+        value = data.get('delay')
+        if isinstance(value, int) and value > 0:
+            return proxy, value, None
+        return proxy, None, 'تاخیر معتبر برنگشت'
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
+        return proxy, None, str(error)
+
+
+def recv_exact(sock: socket.socket, count: int) -> bytes:
     data = b''
-    while len(data) < size:
-        part = sock.recv(size - len(data))
+    while len(data) < count:
+        part = sock.recv(count - len(data))
         if not part:
-            raise OSError('اتصال هنگام دریافت پاسخ بسته شد')
+            raise OSError('اتصال بسته شد')
         data += part
     return data
 
 
-def real_socks_test(port: int) -> tuple[bool, float | None, str]:
-    """SOCKS5 handshake + remote TLS handshake + HTTP response: no false positives."""
+def socks_http_test(port: int) -> tuple[bool, float | None, str]:
+    """Tests the final listener, not only Mihomo's API: SOCKS5 + TLS + HTTP."""
     started = time.perf_counter()
     try:
-        with socket.create_connection(('127.0.0.1', port), timeout=REAL_TIMEOUT) as sock:
-            sock.settimeout(REAL_TIMEOUT)
+        with socket.create_connection(('127.0.0.1', port), timeout=TIMEOUT) as sock:
+            sock.settimeout(TIMEOUT)
             sock.sendall(b'\x05\x01\x00')
             if recv_exact(sock, 2) != b'\x05\x00':
                 return False, None, 'SOCKS handshake ناموفق'
-            host = TEST_HOST.encode('idna')
-            sock.sendall(b'\x05\x01\x00\x03' + bytes([len(host)]) + host + TEST_PORT.to_bytes(2, 'big'))
+            host = b'example.com'
+            sock.sendall(b'\x05\x01\x00\x03' + bytes([len(host)]) + host + (443).to_bytes(2, 'big'))
             reply = recv_exact(sock, 4)
             if reply[1] != 0:
-                return False, None, f'اتصال SOCKS ناموفق (کد {reply[1]})'
+                return False, None, f'کد SOCKS {reply[1]}'
             if reply[3] == 1:
                 recv_exact(sock, 6)
             elif reply[3] == 4:
@@ -310,28 +219,26 @@ def real_socks_test(port: int) -> tuple[bool, float | None, str]:
             elif reply[3] == 3:
                 recv_exact(sock, recv_exact(sock, 1)[0] + 2)
             else:
-                return False, None, 'پاسخ SOCKS نامعتبر'
+                return False, None, 'ATYP نامعتبر'
             context = ssl.create_default_context()
-            with context.wrap_socket(sock, server_hostname=TEST_HOST) as tls:
+            with context.wrap_socket(sock, server_hostname='example.com') as tls:
                 tls.sendall(b'GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n')
                 if not tls.recv(16).startswith(b'HTTP/'):
-                    return False, None, 'TLS برقرار شد ولی HTTP پاسخ معتبر نداد'
-        latency = round((time.perf_counter() - started) * 1000, 1)
-        return True, latency, 'TLS و HTTP موفق'
+                    return False, None, 'HTTP معتبر نیست'
+        return True, round((time.perf_counter() - started) * 1000, 1), 'SOCKS/TLS/HTTP موفق'
     except (OSError, ssl.SSLError) as error:
         return False, None, str(error)
 
 
-def start_xray(nodes: list[Node]) -> None:
-    binary = shutil.which('xray')
-    if not binary:
-        raise RuntimeError('Xray پیدا نشد. install.sh را اجرا کنید.')
-    write_json(XRAY, xray_config(nodes))
-    check = subprocess.run([binary, 'run', '-test', '-config', str(XRAY)], capture_output=True, text=True)
-    if check.returncode:
-        raise RuntimeError(check.stderr.strip() or 'کانفیگ Xray نامعتبر است.')
-    subprocess.run(['systemctl', 'restart', 'titan-xray.service'], check=True)
-    time.sleep(1)
+def sanaei_json(count: int) -> list[dict[str, Any]]:
+    return [{'tag': f'Socks_{index}_titan', 'protocol': 'socks', 'settings': {'servers': [{'address': '127.0.0.1', 'port': PORT_BASE + index - 1, 'users': []}]}} for index in range(1, count + 1)]
+
+
+def source_of(proxy: str, subs: list[Subscription]) -> str:
+    for sub in subs:
+        if proxy.startswith(sub.provider + '::'):
+            return sub.name
+    return 'نامشخص'
 
 
 def test_subs() -> int:
@@ -340,15 +247,14 @@ def test_subs() -> int:
     if not subs:
         print('هیچ سابی ثبت نشده است.')
         return 1
-    print('--- تست دریافت و پارس ساب‌ها ---')
+    restart_mihomo(subs)
+    names = group_members()
+    print('--- نتیجهٔ بارگذاری Mihomo ---')
     for sub in subs:
-        _, nodes, unsupported, error = load_subscription(sub)
-        if error:
-            print(f'✗ {sub.name}: خطا در دریافت — {error}')
-        else:
-            extra = f' | پشتیبانی‌نشده: {unsupported}' if unsupported else ''
-            print(f'✓ {sub.name}: {len(nodes)} نود پشتیبانی‌شده{extra}')
-    return 0
+        count = sum(item.startswith(sub.provider + '::') for item in names)
+        print(f'✓ {sub.name}: {count} نود توسط Mihomo بارگذاری شد')
+    print(f'جمع کل: {len(names)} نود')
+    return 0 if names else 1
 
 
 def refresh(quiet: bool = False) -> int:
@@ -356,91 +262,84 @@ def refresh(quiet: bool = False) -> int:
     subs = subscriptions()
     if not subs:
         if not quiet:
-            print('هیچ سابی ثبت نشده است. ابتدا یک ساب اضافه کنید.')
+            print('هیچ سابی ثبت نشده است.')
         return 0
-    collected: list[Node] = []
-    reports: list[dict[str, Any]] = []
     if not quiet:
-        print('--- مرحله ۱: دریافت و پارس ساب‌ها ---')
-    for sub in subs:
-        _, nodes, unsupported, error = load_subscription(sub)
-        reports.append({'name': sub.name, 'url': sub.url, 'parsed_nodes': len(nodes), 'unsupported': unsupported, 'error': error})
-        if error:
-            logging.warning('%s: %s', sub.name, error)
-            if not quiet:
-                print(f'✗ {sub.name}: {error}')
-        else:
-            collected.extend(nodes)
-            if not quiet:
-                print(f'✓ {sub.name}: {len(nodes)} نود پشتیبانی‌شده')
-    unique = list({node.key(): node for node in collected}.values())
+        print('--- مرحله ۱: دریافت Subscriptionها با Mihomo ---')
+    restart_mihomo(subs)
+    names = group_members()
+    if not names:
+        write_json(SANAEI, [])
+        write_json(STATUS, {'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'loaded': 0, 'selected': [], 'error': 'هیچ نودی از providerها بارگذاری نشد'})
+        subprocess.run(['systemctl', 'stop', 'titan-mihomo.service'], check=False)
+        if not quiet:
+            print('هیچ نودی توسط Mihomo بارگذاری نشد.')
+        return 0
     if not quiet:
-        print(f'--- مرحله ۲: تست TCP هم‌زمان ({len(unique)} نود) ---')
-    tcp_alive: list[tuple[Node, float]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(64, max(1, len(unique)))) as pool:
-        for node, latency in pool.map(tcp_probe, unique):
-            if latency is not None:
-                tcp_alive.append((node, latency))
-    tcp_alive.sort(key=lambda item: item[1])
+        print(f'--- مرحله ۲: تست API واقعی Mihomo برای {len(names)} نود ---')
+    tested: list[tuple[str, int]] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(names))) as pool:
+        for name, ms, error in pool.map(delay, names):
+            if ms is not None:
+                tested.append((name, ms))
+                if not quiet:
+                    print(f'✓ {name} | {source_of(name, subs)} | {ms}ms')
+            elif not quiet:
+                print(f'✗ {name} | {source_of(name, subs)} | {error}')
+    tested.sort(key=lambda item: item[1])
+    candidates = [name for name, _ in tested[:MAX_NODES]]
     if not quiet:
-        print(f'{len(tcp_alive)} نود TCP پاسخ‌گو هستند. مرحله ۳: تست واقعی SOCKS/TLS/HTTP')
-    passed: list[tuple[Node, float, str]] = []
-    for start in range(0, len(tcp_alive), MAX_NODES):
-        batch = tcp_alive[start:start + MAX_NODES]
-        try:
-            start_xray([node for node, _ in batch])
-        except RuntimeError as error:
-            logging.warning('دستهٔ آزمایشی نامعتبر: %s', error)
-            continue
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            results = list(pool.map(real_socks_test, [PORT_BASE + index for index in range(len(batch))]))
-        for (node, tcp_ms), (ok, real_ms, message) in zip(batch, results):
-            if not quiet:
-                mark = '✓' if ok else '✗'
-                speed = f'{real_ms}ms' if real_ms is not None else '-'
-                print(f'{mark} {node.name} | منبع: {node.source} | TCP: {tcp_ms}ms | واقعی: {speed} | {message}')
-            if ok and real_ms is not None and len(passed) < MAX_NODES:
-                passed.append((node, real_ms, message))
-        if len(passed) >= MAX_NODES:
-            break
-    passed.sort(key=lambda item: item[1])
-    final_nodes = [node for node, _, _ in passed]
-    write_json(SANAEI, sanaei_config(len(final_nodes)))
-    if final_nodes:
-        start_xray(final_nodes)
+        print(f'--- مرحله ۳: ساخت و تست SOCKSهای نهایی ({len(candidates)} نود) ---')
+    if candidates:
+        restart_mihomo(subs, candidates)
     else:
-        write_json(XRAY, xray_config([]))
-        subprocess.run(['systemctl', 'stop', 'titan-xray.service'], check=False)
-    selected = []
-    for index, (node, real_ms, message) in enumerate(passed, 1):
-        selected.append({'index': index, 'port': PORT_BASE + index - 1, 'real_latency_ms': real_ms, 'protocol': node.protocol, 'name': node.name, 'address': node.address, 'source': node.source, 'result': message})
-    write_json(STATUS, {'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'subscription_count': len(subs), 'unique_nodes': len(unique), 'tcp_alive': len(tcp_alive), 'selected': selected, 'subscriptions': reports})
+        write_json(SANAEI, [])
+        subprocess.run(['systemctl', 'stop', 'titan-mihomo.service'], check=False)
+    results: list[dict[str, Any]] = []
+    if candidates:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+            checks = list(pool.map(socks_http_test, [PORT_BASE + i for i in range(len(candidates))]))
+        for index, (name, delay_ms) in enumerate(tested[:MAX_NODES], 1):
+            ok, real_ms, message = checks[index - 1]
+            if ok and real_ms is not None:
+                results.append({'index': len(results) + 1, 'port': PORT_BASE + len(results), 'proxy': name, 'source': source_of(name, subs), 'mihomo_delay_ms': delay_ms, 'socks_latency_ms': real_ms, 'message': message})
+            if not quiet:
+                print(f"{'✓' if ok else '✗'} پورت {PORT_BASE + index - 1} | {name} | {message}")
+    # If a final listener failed, regenerate config with only truly healthy proxies.
+    final_names = [item['proxy'] for item in results]
+    if final_names:
+        restart_mihomo(subs, final_names)
+    else:
+        subprocess.run(['systemctl', 'stop', 'titan-mihomo.service'], check=False)
+    write_json(SANAEI, sanaei_json(len(final_names)))
+    report = {'updated_at': time.strftime('%Y-%m-%d %H:%M:%S'), 'loaded': len(names), 'api_healthy': len(tested), 'selected': results, 'subscriptions': [{'name': s.name, 'url': s.url, 'loaded': sum(n.startswith(s.provider + "::") for n in names)} for s in subs]}
+    write_json(STATUS, report)
     if not quiet:
         print('--- نتیجهٔ نهایی ---')
-        if selected:
-            for item in selected:
-                print(f"{item['index']}. پورت {item['port']} | {item['real_latency_ms']}ms | {item['protocol']} | {item['name']} | منبع: {item['source']}")
+        if results:
+            for item in results:
+                print(f"{item['index']}. 127.0.0.1:{item['port']} | {item['socks_latency_ms']}ms | {item['proxy']} | منبع: {item['source']}")
             print(f'JSON ثنایی: {SANAEI}')
         else:
-            print('هیچ نودی تست واقعی را پاس نکرد؛ خروجی ثنایی خالی است.')
+            print('هیچ نودی تست واقعی SOCKS را پاس نکرد.')
     return 0
 
 
-def show_status() -> int:
+def status() -> int:
     if not STATUS.exists():
         print('هنوز تستی اجرا نشده است.')
         return 1
     data = json.loads(STATUS.read_text(encoding='utf-8'))
-    print(f"آخرین اجرا: {data['updated_at']} | یکتا: {data['unique_nodes']} | TCP پاسخ‌گو: {data['tcp_alive']}")
-    if not data['selected']:
+    print(f"آخرین اجرا: {data.get('updated_at', '-')} | بارگذاری‌شده: {data.get('loaded', 0)} | API سالم: {data.get('api_healthy', 0)}")
+    for item in data.get('selected', []):
+        print(f"{item['index']}. پورت {item['port']} | API: {item['mihomo_delay_ms']}ms | SOCKS: {item['socks_latency_ms']}ms | {item['proxy']} | منبع: {item['source']}")
+    if not data.get('selected'):
         print('هیچ SOCKS سالمی انتخاب نشده است.')
-    for item in data['selected']:
-        print(f"{item['index']}. 127.0.0.1:{item['port']} | {item['real_latency_ms']}ms | {item['protocol']} | {item['name']} | منبع: {item['source']}")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='RedCore-Proxy')
+    parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=['refresh', 'test-subs', 'status', 'json', 'socks-test'])
     parser.add_argument('port', nargs='?', type=int)
     parser.add_argument('--quiet', action='store_true')
@@ -451,12 +350,12 @@ def main() -> int:
         if args.command == 'test-subs':
             return test_subs()
         if args.command == 'status':
-            return show_status()
+            return status()
         if args.command == 'json':
             print(SANAEI.read_text(encoding='utf-8') if SANAEI.exists() else 'هنوز JSON ساخته نشده است.')
             return 0
-        ok, latency, message = real_socks_test(args.port or PORT_BASE)
-        print(f"پورت {args.port or PORT_BASE}: {'✓ سالم' if ok else '✗ ناموفق'} | {latency if latency else '-'}ms | {message}")
+        ok, latency, message = socks_http_test(args.port or PORT_BASE)
+        print(f"پورت {args.port or PORT_BASE}: {'✓ سالم' if ok else '✗ ناموفق'} | {latency if latency is not None else '-'}ms | {message}")
         return 0 if ok else 1
     except Exception as error:
         logging.exception('خطا')

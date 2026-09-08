@@ -1,51 +1,61 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-RAW_BASE="https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/main"
-SOURCE_DIR="$(mktemp -d)"
-trap 'rm -rf "$SOURCE_DIR"' EXIT
+RAW_BASE='https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/main'
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "$WORK_DIR"' EXIT
 
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo 'با root یا sudo اجرا کنید.' >&2; exit 1; }
 
 echo 'Downloading RedCore-Proxy files…'
 for file in redcore_proxy.py titan; do
-  curl -fL --retry 3 --connect-timeout 15 "$RAW_BASE/$file" -o "$SOURCE_DIR/$file"
+  curl -fL --retry 3 --connect-timeout 15 "$RAW_BASE/$file" -o "$WORK_DIR/$file"
 done
 
 if command -v apt-get >/dev/null 2>&1; then
-  if ! apt-get update; then
-    echo 'هشدار: یک مخزن خارجی APT خطا دارد؛ نصب با فهرست بسته‌های موجود ادامه می‌یابد.' >&2
-  fi
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl jq netcat-openbsd ca-certificates unzip
+  apt-get update || echo 'هشدار: یک مخزن خارجی APT خطا دارد؛ ادامه با فهرست بسته‌های موجود.' >&2
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl jq ca-certificates gzip
 elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y python3 curl jq nmap-ncat ca-certificates unzip
+  dnf install -y python3 curl jq ca-certificates gzip
 else
-  echo 'مدیر بسته پشتیبانی‌نشده است. python3 curl jq netcat unzip را دستی نصب کنید.' >&2
-  exit 1
+  echo 'مدیر بسته پشتیبانی‌نشده است.' >&2; exit 1
 fi
 
-if ! command -v xray >/dev/null 2>&1; then
-  installer="$(mktemp)"
-  curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$installer"
-  bash "$installer" install
-  rm -f "$installer"
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64) ASSET_RE='mihomo-linux-amd64.*\.gz$' ;;
+  aarch64|arm64) ASSET_RE='mihomo-linux-arm64.*\.gz$' ;;
+  *) echo "معماری پشتیبانی‌نشده: $ARCH" >&2; exit 1 ;;
+esac
+
+if ! command -v mihomo >/dev/null 2>&1; then
+  echo 'Installing Mihomo…'
+  RELEASE_URL="$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r --arg re "$ASSET_RE" '.assets[] | select(.browser_download_url | test($re)) | .browser_download_url' | head -n1)"
+  [[ -n "$RELEASE_URL" && "$RELEASE_URL" != null ]] || { echo 'فایل انتشار Mihomo پیدا نشد.' >&2; exit 1; }
+  curl -fL "$RELEASE_URL" -o "$WORK_DIR/mihomo.gz"
+  gzip -dc "$WORK_DIR/mihomo.gz" > /usr/local/bin/mihomo
+  chmod 755 /usr/local/bin/mihomo
 fi
 
-install -d -m 0755 /opt/redcore-proxy /etc/titan /var/log/titan
-install -m 0755 "$SOURCE_DIR/redcore_proxy.py" /opt/redcore-proxy/redcore_proxy.py
-install -m 0755 "$SOURCE_DIR/titan" /usr/local/bin/titan
+install -d -m 0755 /opt/redcore-proxy /etc/titan /etc/titan/providers /var/log/titan
+install -m 0755 "$WORK_DIR/redcore_proxy.py" /opt/redcore-proxy/redcore_proxy.py
+install -m 0755 "$WORK_DIR/titan" /usr/local/bin/titan
 touch /etc/titan/subs.txt
 chmod 600 /etc/titan/subs.txt
 
-cat >/etc/systemd/system/titan-xray.service <<'EOF'
+# مهاجرت از نسخهٔ قدیمی Xray Titan؛ فایل‌های قبلی را حذف نمی‌کند، فقط سرویس
+# قدیمی را متوقف می‌کند تا پورت‌های 10801 تا 10808 با Mihomo تداخل نداشته باشند.
+systemctl disable --now titan-xray.service 2>/dev/null || true
+
+cat >/etc/systemd/system/titan-mihomo.service <<'EOF'
 [Unit]
-Description=RedCore-Proxy local SOCKS Xray
+Description=RedCore-Proxy Mihomo local SOCKS endpoints
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/xray run -config /etc/titan/xray.json
+ExecStart=/usr/local/bin/mihomo -d /etc/titan -f /etc/titan/mihomo.yaml
 Restart=on-failure
 RestartSec=3
 
@@ -79,4 +89,4 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now titan-refresh.timer
-echo 'نصب کامل شد. اجرا کنید: titan'
+echo 'نصب Mihomo کامل شد. اجرا کنید: titan'

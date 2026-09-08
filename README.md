@@ -1,30 +1,24 @@
-# RedCore-Proxy
+# RedCore-Proxy — Mihomo Edition
 
-ابزار لینوکسی فارسی برای دریافت لینک‌های Subscription، تست واقعی نودها و تولید حداکثر ۸ خروجی SOCKS5 محلی برای پنل ثنایی / 3X-UI.
+ابزار لینوکسی فارسی برای دریافت Subscriptionهای عمومی، تست واقعی نودها با **Mihomo / Clash Meta** و ساخت حداکثر ۸ SOCKS5 محلی برای پنل ثنایی / 3X-UI.
 
-## روش انتخاب نود
+## چرا Mihomo؟
 
-1. دریافت و decode ساب (Base64 یا لینک‌های خطی).
-2. پارس VLESS، Trojan، VMess و Shadowsocks.
-3. تست هم‌زمان TCP برای حذف نودهای خاموش.
-4. ساخت آزمایشی Xray برای هر دستهٔ ۸تایی.
-5. تست واقعی از داخل SOCKS: اتصال SOCKS5 → TLS → درخواست HTTP به `example.com`.
-6. رتبه‌بندی براساس زمان تست واقعی و نگه‌داری حداکثر ۸ نود موفق.
+Mihomo محتوای subscription را مستقیماً به‌صورت YAML، URI و Base64 می‌خواند؛ بنابراین پارس دستی و ناقص VLESS، Reality، XHTTP، Hysteria2 و TUIC حذف شده است. Mihomo از هر provider، نودها را می‌گیرد، سپس اسکریپت از API رسمی آن delay واقعی را می‌سنجد. برای هر نود منتخب نیز یک listener SOCKS مستقل روی localhost ساخته می‌شود.
 
-هیچ نودی فقط با «بازبودن پورت TCP» وارد خروجی نهایی نمی‌شود.
+## روند واقعی تست
 
-## پشتیبانی پروتکل
-
-- VLESS: TCP، WS، gRPC، HTTPUpgrade، XHTTP، TLS و Reality
-- Trojan
-- VMess
-- Shadowsocks (لینک‌های URI رایج)
-
-Hysteria2 و TUIC به هستهٔ sing-box نیاز دارند و در این نسخهٔ Xray وارد خروجی نمی‌شوند؛ در گزارش به‌عنوان «پشتیبانی‌نشده» ثبت می‌شوند.
+1. هر لینک ساب به Mihomo به‌عنوان `proxy-provider` داده می‌شود.
+2. Mihomo محتوای URI/Base64/YAML را دریافت و بارگذاری می‌کند.
+3. همهٔ نودها با API delay Mihomo روی `https://www.gstatic.com/generate_204` تست می‌شوند.
+4. ۸ نود سریع‌تر انتخاب می‌شوند.
+5. برای هر نود یک SOCKS در `127.0.0.1:10801` تا `10808` ایجاد می‌شود.
+6. هر SOCKS با اتصال واقعی SOCKS5 → TLS → HTTP دوباره بررسی می‌شود.
+7. فقط پورت‌های واقعاً سالم وارد `sanaei.json` می‌شوند.
 
 ## نصب
 
-پس از آپلود همهٔ فایل‌ها در ریشهٔ مخزن `RedBoy-011/RedCore-Proxy`:
+پس از آپلود فایل‌های این پوشه در repository عمومی `RedBoy-011/RedCore-Proxy`:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/main/install.sh)
@@ -36,10 +30,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/mai
 titan
 ```
 
-یا:
+یا خط فرمان:
 
 ```bash
-titan subs add 'نام ساب' 'https://example.com/sub.txt'
+titan subs add 'Khosrow' 'https://raw.githubusercontent.com/ThomasJasperthecat/sub/main/sublist1.txt'
 titan test-subs
 titan refresh
 titan status
@@ -49,12 +43,12 @@ titan json
 
 ## فایل‌های سرور
 
-| مسیر | کاربرد |
-|---|---|
-| `/etc/titan/subs.txt` | هر خط: `نام ساب | لینک ساب` |
-| `/etc/titan/xray.json` | پیکربندی تولیدشدهٔ Xray |
-| `/etc/titan/sanaei.json` | JSON آمادهٔ Outbound ثنایی |
-| `/etc/titan/status.json` | گزارش نودهای انتخاب‌شده و نتیجه تست |
-| `/var/log/titan/refresh.log` | لاگ اجرای پروژه |
+| مسیر | توضیح |
+| --- | --- |
+| `/etc/titan/subs.txt` | هر خط: `نام | لینک subscription` |
+| `/etc/titan/mihomo.yaml` | کانفیگ تولیدشدهٔ Mihomo |
+| `/etc/titan/sanaei.json` | فقط SOCKSهای سالم برای پنل ثنایی |
+| `/etc/titan/status.json` | گزارش تست و نودهای نهایی |
+| `/var/log/titan/refresh.log` | لاگ فرآیند |
 
-پس از `titan refresh` فقط JSON موجود در `/etc/titan/sanaei.json` را وارد پنل کنید. اگر کمتر از ۸ نود واقعاً سالم باشد، فقط همان تعداد خروجی ساخته می‌شود.
+پورت API Mihomo فقط روی `127.0.0.1:19090` است و به اینترنت باز نمی‌شود. SOCKSها نیز فقط روی localhost هستند.
