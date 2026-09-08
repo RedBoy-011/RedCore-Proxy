@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -u
+APP=redcore-proxy
+PY=/opt/redcore-proxy/redcore_proxy.py
+SUBS=/etc/redcore-proxy/subs.txt
+
+need_root() { [ "${EUID:-$(id -u)}" -eq 0 ] || { echo 'این دستور را با root اجرا کنید.'; exit 1; }; }
+run() { need_root; python3 "$PY" "$@"; }
+pause() { read -r -p 'برای ادامه Enter بزنید... ' _; }
+add_sub() {
+  need_root
+  read -r -p 'نام ساب: ' name
+  read -r -p 'لینک ساب: ' url
+  [ -n "$url" ] || { echo 'لینک خالی است.'; return; }
+  grep -Fq -- "| $url" "$SUBS" && { echo 'این لینک قبلاً ثبت شده است.'; return; }
+  printf '%s | %s\n' "${name:-ساب جدید}" "$url" >> "$SUBS"
+  echo 'ساب اضافه شد. برای دریافت و تست، گزینه ۵ را بزنید.'
+}
+remove_sub() {
+  need_root
+  mapfile -t lines < "$SUBS"
+  [ "${#lines[@]}" -gt 0 ] || { echo 'سابی ثبت نشده است.'; return; }
+  printf '%s\n' "${!lines[@]}" | while read -r index; do printf '%d) %s\n' "$((index+1))" "${lines[$index]}"; done
+  read -r -p 'شماره برای حذف: ' number
+  [[ "$number" =~ ^[0-9]+$ ]] && [ "$number" -ge 1 ] && [ "$number" -le "${#lines[@]}" ] || { echo 'شماره نامعتبر است.'; return; }
+  : > "$SUBS"
+  for index in "${!lines[@]}"; do [ "$index" -eq "$((number-1))" ] || printf '%s\n' "${lines[$index]}" >> "$SUBS"; done
+  echo 'ساب حذف شد.'
+}
+list_subs() { need_root; nl -ba -w2 -s') ' "$SUBS"; }
+menu() {
+  while true; do
+    clear
+    cat <<'EOF'
+╔══════════════════════════════════════════════╗
+║              RedCore-Proxy / Xray             ║
+╠══════════════════════════════════════════════╣
+║ 1) افزودن ساب                                 ║
+║ 2) حذف ساب                                   ║
+║ 3) نمایش ساب‌ها                              ║
+║ 4) دریافت و پارس ساب‌ها                      ║
+║ 5) تست واقعی، پینگ و ساخت 8 SOCKS             ║
+║ 6) نمایش نودها و پورت‌های فعال               ║
+║ 7) نمایش JSON آماده پنل ثنایی                 ║
+║ 8) تست یک SOCKS داخلی                         ║
+║ 9) مشاهده لاگ زنده (Ctrl+C بازگشت)            ║
+║ 0) خروج                                      ║
+╚══════════════════════════════════════════════╝
+EOF
+    read -r -p 'انتخاب شما: ' option
+    case "$option" in
+      1) add_sub; pause;; 2) remove_sub; pause;; 3) list_subs; pause;;
+      4) run test-subs; pause;; 5) run refresh; pause;; 6) run status; pause;;
+      7) run json; pause;;
+      8) read -r -p 'پورت (پیش‌فرض 10801): ' port; run socks-test "${port:-10801}"; pause;;
+      9) need_root; journalctl -fu redcore-proxy-refresh.service;;
+      0) exit 0;; *) echo 'گزینه نامعتبر است.'; sleep 1;;
+    esac
+  done
+}
+case "${1:-menu}" in
+  menu) menu;;
+  refresh|status|json|test-subs) run "$1";;
+  socks-test) run socks-test "${2:-10801}";;
+  logs) need_root; journalctl -fu redcore-proxy-refresh.service;;
+  subs)
+    case "${2:-list}" in
+      add) need_root; [ -n "${4:-}" ] || { echo "استفاده: $APP subs add 'نام' 'لینک'"; exit 2; }; grep -Fq -- "| $4" "$SUBS" && { echo 'این لینک قبلاً ثبت شده است.'; exit 0; }; printf '%s | %s\n' "$3" "$4" >> "$SUBS";;
+      remove) remove_sub;; list) list_subs;; *) echo "استفاده: $APP subs {add|remove|list}"; exit 2;;
+    esac;;
+  *) echo "دستورها: $APP {menu|refresh|test-subs|status|json|socks-test|logs|subs}"; exit 2;;
+esac

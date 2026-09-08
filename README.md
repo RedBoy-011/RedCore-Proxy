@@ -1,57 +1,96 @@
-# RedCore-Proxy — Mihomo Edition
+# RedCore-Proxy
 
-ابزار لینوکسی فارسی برای دریافت Subscriptionهای عمومی، تست واقعی نودها با **Mihomo / Clash Meta** و ساخت حداکثر ۸ SOCKS5 محلی برای پنل ثنایی / 3X-UI.
+مدیر ساب‌های VLESS، VMess و Trojan برای لینوکس. برنامه با **Python** نوشته شده و فقط برای برقراری واقعی اتصال از **Xray Core** استفاده می‌کند.
 
-## چرا Mihomo؟
+هر پنج دقیقه همهٔ نودهای قابل‌پارس با SOCKS موقت Xray و اتصال واقعی HTTPS تست می‌شوند؛ سالم‌ترین حداکثر ۸ نود بر اساس زمان پاسخ انتخاب شده و به SOCKSهای لوکال مستقل تبدیل می‌شوند:
 
-Mihomo محتوای subscription را مستقیماً به‌صورت YAML، URI و Base64 می‌خواند؛ بنابراین پارس دستی و ناقص VLESS، Reality، XHTTP، Hysteria2 و TUIC حذف شده است. Mihomo از هر provider، نودها را می‌گیرد، سپس اسکریپت از API رسمی آن delay واقعی را می‌سنجد. برای هر نود منتخب نیز یک listener SOCKS مستقل روی localhost ساخته می‌شود.
+`127.0.0.1:10801` تا `127.0.0.1:10808`
 
-## روند واقعی تست
-
-1. هر لینک ساب به Mihomo به‌عنوان `proxy-provider` داده می‌شود.
-2. Mihomo محتوای URI/Base64/YAML را دریافت و بارگذاری می‌کند.
-3. همهٔ نودها با API delay Mihomo روی `https://www.gstatic.com/generate_204` تست می‌شوند.
-4. ۸ نود سریع‌تر انتخاب می‌شوند.
-5. برای هر نود یک SOCKS در `127.0.0.1:10801` تا `10808` ایجاد می‌شود.
-6. هر SOCKS با اتصال واقعی SOCKS5 → TLS → HTTP دوباره بررسی می‌شود.
-7. فقط پورت‌های واقعاً سالم وارد `sanaei.json` می‌شوند.
+هر پورت فقط به یک نود وصل است؛ هیچ load-balance یا انتخاب ساختگی وجود ندارد. دانلود ساب‌ها حداکثر هر یک ساعت یک بار انجام می‌شود و تست نودهای کش‌شده هر پنج دقیقه تکرار می‌شود.
 
 ## نصب
 
-پس از آپلود فایل‌های این پوشه در repository عمومی `RedBoy-011/RedCore-Proxy`:
+روی Ubuntu/Debian یا Fedora/RHEL با کاربر root اجرا کنید:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/main/install.sh)
 ```
 
-## استفاده
+نصب‌کننده **هیچ ساب نمونه‌ای** اضافه نمی‌کند.
+
+## شروع سریع
 
 ```bash
-titan
+redcore-proxy
 ```
 
-یا خط فرمان:
+یا بدون منو:
 
 ```bash
-# این مقادیر را با نام و لینک خودتان جایگزین کنید.
-titan subs add 'نام ساب' 'https://example.com/your-subscription'
-titan test-subs
-titan refresh
-titan status
-titan socks-test 10801
-titan json
+redcore-proxy subs add 'نام دلخواه' 'https://example.com/your-subscription'
+redcore-proxy test-subs
+redcore-proxy refresh
+redcore-proxy status
+redcore-proxy json
+redcore-proxy socks-test 10801
 ```
 
-نصب‌کننده هیچ لینک سابی اضافه نمی‌کند. هر ساب فقط با دستور `titan subs add` یا گزینهٔ «افزودن ساب» ثبت می‌شود.
+در منو گزینهٔ ۵ تمام نودها را تست، مرتب و خروجی‌ها را می‌سازد. اولین اجرا ممکن است چند دقیقه طول بکشد، چون اتصال واقعی همهٔ نودها بررسی می‌شود.
 
-## فایل‌های سرور
+## JSON برای پنل ثنایی / 3X-UI
 
-| مسیر | توضیح |
-| --- | --- |
-| `/etc/titan/subs.txt` | هر خط: `نام | لینک subscription` |
-| `/etc/titan/mihomo.yaml` | کانفیگ تولیدشدهٔ Mihomo |
-| `/etc/titan/sanaei.json` | فقط SOCKSهای سالم برای پنل ثنایی |
-| `/etc/titan/status.json` | گزارش تست و نودهای نهایی |
-| `/var/log/titan/refresh.log` | لاگ فرآیند |
+پس از یک اجرای موفق:
 
-پورت API Mihomo فقط روی `127.0.0.1:19090` است و به اینترنت باز نمی‌شود. SOCKSها نیز فقط روی localhost هستند.
+```bash
+redcore-proxy json
+```
+
+یا فایل زیر را در Outbounds پنل وارد کنید:
+
+```text
+/etc/redcore-proxy/sanaei.json
+```
+
+نمونهٔ یک خروجی:
+
+```json
+{
+  "tag": "Socks_1_redcore",
+  "protocol": "socks",
+  "settings": {
+    "servers": [{"address": "127.0.0.1", "port": 10801, "users": []}]
+  }
+}
+```
+
+## مسیرها و زمان‌بندی
+
+| مورد | مسیر / رفتار |
+|---|---|
+| فهرست ساب‌ها | `/etc/redcore-proxy/subs.txt` |
+| کش نودهای دانلودشده | `/etc/redcore-proxy/nodes.json` |
+| کانفیگ نهایی Xray | `/etc/redcore-proxy/config.json` |
+| خروجی JSON پنل | `/etc/redcore-proxy/sanaei.json` |
+| نتیجهٔ آخر | `/etc/redcore-proxy/status.json` |
+| لاگ | `/var/log/redcore-proxy/refresh.log` |
+| تست پینگ | هر ۵ دقیقه |
+| دانلود مجدد ساب | حداکثر هر ۱ ساعت |
+
+برای دیدن وضعیت زمان‌بندی:
+
+```bash
+systemctl list-timers redcore-proxy-refresh.timer
+```
+
+برای مشاهدهٔ لاگ زنده:
+
+```bash
+redcore-proxy logs
+```
+
+## نکات
+
+- فقط `vless://`، `vmess://` و `trojan://` پردازش می‌شوند.
+- لینک‌های Base64 و لینک‌های raw GitHub پشتیبانی می‌شوند؛ لینک `github.com/.../blob/...` نیز خودکار به raw تبدیل می‌شود.
+- اگر کمتر از ۸ نود واقعاً سالم باشد، فقط همان تعداد پورت ساخته می‌شود.
+- تست موفق به معنای برقراری SOCKS، TLS و دریافت پاسخ HTTPS است؛ صرفاً باز بودن TCP محسوب نمی‌شود.

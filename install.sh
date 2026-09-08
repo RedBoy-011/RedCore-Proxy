@@ -1,92 +1,81 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
+REPO='https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/main'
+APP=redcore-proxy
+[ "${EUID:-$(id -u)}" -eq 0 ] || { echo 'Run as root.'; exit 1; }
 
-RAW_BASE='https://raw.githubusercontent.com/RedBoy-011/RedCore-Proxy/main'
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+install_packages() {
+  if command -v apt-get >/dev/null; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl jq unzip ca-certificates
+  elif command -v dnf >/dev/null; then
+    dnf install -y python3 curl jq unzip ca-certificates
+  else
+    echo 'Ubuntu/Debian یا Fedora/RHEL پشتیبانی می‌شود.'; exit 1
+  fi
+}
+install_xray() {
+  command -v xray >/dev/null 2>&1 && return
+  case "$(uname -m)" in
+    x86_64|amd64) asset='Xray-linux-64.zip';;
+    aarch64|arm64) asset='Xray-linux-arm64-v8a.zip';;
+    *) echo "معماری پشتیبانی‌نشده: $(uname -m)"; exit 1;;
+  esac
+  url="$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .browser_download_url' | head -n1)"
+  [ -n "$url" ] && [ "$url" != null ] || { echo 'دریافت نسخه Xray ناموفق بود.'; exit 1; }
+  work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+  curl -fL "$url" -o "$work/xray.zip"
+  unzip -q "$work/xray.zip" -d "$work/out"
+  install -m 0755 "$work/out/xray" /usr/local/bin/xray
+}
 
-[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo 'با root یا sudo اجرا کنید.' >&2; exit 1; }
-
-echo 'Downloading RedCore-Proxy files…'
-for file in redcore_proxy.py titan; do
-  curl -fL --retry 3 --connect-timeout 15 "$RAW_BASE/$file" -o "$WORK_DIR/$file"
+echo 'Installing RedCore-Proxy…'
+install_packages
+install_xray
+install -d -m 0755 /opt/redcore-proxy /etc/redcore-proxy /var/log/redcore-proxy
+touch /etc/redcore-proxy/subs.txt
+chmod 600 /etc/redcore-proxy/subs.txt
+for file in redcore_proxy.py redcore-proxy; do
+  curl -fL "$REPO/$file" -o "/opt/redcore-proxy/$file"
 done
+chmod 755 /opt/redcore-proxy/redcore_proxy.py /opt/redcore-proxy/redcore-proxy
+ln -sf /opt/redcore-proxy/redcore-proxy /usr/local/bin/redcore-proxy
 
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update || echo 'هشدار: یک مخزن خارجی APT خطا دارد؛ ادامه با فهرست بسته‌های موجود.' >&2
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl jq ca-certificates gzip
-elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y python3 curl jq ca-certificates gzip
-else
-  echo 'مدیر بسته پشتیبانی‌نشده است.' >&2; exit 1
-fi
-
-ARCH="$(uname -m)"
-case "$ARCH" in
-  x86_64) ASSET_RE='mihomo-linux-amd64.*\.gz$' ;;
-  aarch64|arm64) ASSET_RE='mihomo-linux-arm64.*\.gz$' ;;
-  *) echo "معماری پشتیبانی‌نشده: $ARCH" >&2; exit 1 ;;
-esac
-
-if ! command -v mihomo >/dev/null 2>&1; then
-  echo 'Installing Mihomo…'
-  RELEASE_URL="$(curl -fsSL https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r --arg re "$ASSET_RE" '.assets[] | select(.browser_download_url | test($re)) | .browser_download_url' | head -n1)"
-  [[ -n "$RELEASE_URL" && "$RELEASE_URL" != null ]] || { echo 'فایل انتشار Mihomo پیدا نشد.' >&2; exit 1; }
-  curl -fL "$RELEASE_URL" -o "$WORK_DIR/mihomo.gz"
-  gzip -dc "$WORK_DIR/mihomo.gz" > /usr/local/bin/mihomo
-  chmod 755 /usr/local/bin/mihomo
-fi
-
-install -d -m 0755 /opt/redcore-proxy /etc/titan /etc/titan/providers /var/log/titan
-install -m 0755 "$WORK_DIR/redcore_proxy.py" /opt/redcore-proxy/redcore_proxy.py
-install -m 0755 "$WORK_DIR/titan" /usr/local/bin/titan
-touch /etc/titan/subs.txt
-chmod 600 /etc/titan/subs.txt
-
-# مهاجرت از نسخهٔ قدیمی Xray Titan؛ فایل‌های قبلی را حذف نمی‌کند، فقط سرویس
-# قدیمی را متوقف می‌کند تا پورت‌های 10801 تا 10808 با Mihomo تداخل نداشته باشند.
-systemctl disable --now titan-xray.service 2>/dev/null || true
-
-cat >/etc/systemd/system/titan-mihomo.service <<'EOF'
+# Stop old project services only; no user subscription or unrelated service is removed.
+systemctl disable --now titan-mihomo.service titan-refresh.timer titan-refresh.service titan-xray.service 2>/dev/null || true
+cat >/etc/systemd/system/redcore-proxy-xray.service <<'EOF'
 [Unit]
-Description=RedCore-Proxy Mihomo local SOCKS endpoints
+Description=RedCore-Proxy Xray local SOCKS outputs
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mihomo -d /etc/titan -f /etc/titan/mihomo.yaml
+ExecStart=/usr/local/bin/xray run -c /etc/redcore-proxy/config.json
 Restart=on-failure
 RestartSec=3
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
-cat >/etc/systemd/system/titan-refresh.service <<'EOF'
+cat >/etc/systemd/system/redcore-proxy-refresh.service <<'EOF'
 [Unit]
-Description=Refresh RedCore-Proxy subscriptions
+Description=RedCore-Proxy subscription update and real proxy tests
 After=network-online.target
 Wants=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/python3 /opt/redcore-proxy/redcore_proxy.py refresh --quiet
 EOF
-
-cat >/etc/systemd/system/titan-refresh.timer <<'EOF'
+cat >/etc/systemd/system/redcore-proxy-refresh.timer <<'EOF'
 [Unit]
-Description=Refresh RedCore-Proxy every 30 minutes
-
+Description=Run RedCore-Proxy ping test every 5 minutes
 [Timer]
-OnBootSec=3min
-OnUnitActiveSec=30min
+OnBootSec=90s
+OnUnitActiveSec=5min
 Persistent=true
-
+Unit=redcore-proxy-refresh.service
 [Install]
 WantedBy=timers.target
 EOF
-
 systemctl daemon-reload
-systemctl enable --now titan-refresh.timer
-echo 'نصب Mihomo کامل شد. اجرا کنید: titan'
+systemctl enable --now redcore-proxy-refresh.timer
+echo 'نصب کامل شد. اجرا کنید: redcore-proxy'
