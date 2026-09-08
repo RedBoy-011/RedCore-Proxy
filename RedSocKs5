@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+echo '=== RedSocKs5-NordVPN ==='
+if [[ "${EUID}" -ne 0 ]]; then echo 'Please run as root: sudo ./RedSocKs5'; exit 1; fi
+source /etc/os-release
+case "${ID:-}" in ubuntu|debian) ;; *) echo "Unsupported OS: ${ID:-unknown}. Ubuntu/Debian required."; exit 1;; esac
+apt-get update -y
+apt-get install -y ca-certificates curl sudo
+
+install_nordvpn_cli() {
+  if ! command -v nordvpn >/dev/null 2>&1; then
+    echo 'Installing official NordVPN Linux CLI...'
+    sh <(curl -fsSL https://downloads.nordcdn.com/apps/linux/install.sh)
+  fi
+  systemctl enable --now nordvpnd 2>/dev/null || true
+}
+
+install_docker() {
+  if ! command -v docker >/dev/null 2>&1; then
+    echo 'Installing Docker Engine and Compose plugin...'
+    apt-get install -y docker.io docker-compose-plugin
+    systemctl enable --now docker
+  elif ! docker compose version >/dev/null 2>&1; then
+    apt-get install -y docker-compose-plugin
+  fi
+  modprobe tun 2>/dev/null || true
+}
+
+echo '1) Token (official NordVPN CLI: one active system-wide location)'
+echo '2) Service credentials (multi-location Docker/SOCKS5)'
+read -rp 'Authentication mode [1/2]: ' mode
+if [[ "${mode:-1}" == "1" ]]; then
+  install_nordvpn_cli
+  read -rsp 'NordVPN access token: ' token; echo
+  read -rp 'Country (e.g. Germany): ' country
+  read -rp 'Local SOCKS port [1081]: ' port; port=${port:-1081}
+  nordvpn login --token "$token"
+  nordvpn connect "$country"
+  echo "Connected to $country with official CLI."
+  echo 'Token mode supports one active VPN route; five simultaneous SOCKS locations require mode 2.'
+  echo "Selected panel port: 127.0.0.1:$port (configure a SOCKS daemon separately)."
+  exit 0
+fi
+[[ "${mode:-}" == "2" ]] || { echo 'Invalid mode.'; exit 1; }
+install_docker
+read -rp 'NordVPN service username: ' user
+read -rsp 'NordVPN service password: ' pass; echo
+read -rp 'Number of locations (1-7) [5]: ' count; count=${count:-5}
+[[ "$count" =~ ^[1-7]$ ]] || { echo 'Count must be 1..7'; exit 1; }
+keys=(DE GR BG RO AT FR PL); ports=(1081 1082 1083 1084 1085 1086 1087)
+candidates=(Germany Romania Bulgaria Austria Italy Hungary Netherlands France Poland Switzerland Czech_Republic Serbia Greece Spain Sweden Denmark)
+{
+  printf 'NORDVPN_USERNAME=%s\nNORDVPN_PASSWORD=%s\n' "$user" "$pass"
+  for k in "${keys[@]}"; do printf 'LOC_%s=%s\nPORT_%s=%s\n' "$k" '' "$k" ''; done
+  echo 'TZ=Europe/Istanbul'
+} > .env
+chmod 600 .env
+
+wait_healthy() {
+  local name="$1"; local deadline=$((SECONDS+90)); local state
+  while (( SECONDS < deadline )); do
+    state=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$name" 2>/dev/null || true)
+    [[ "$state" == healthy ]] && return 0
+    sleep 3
+  done
+  return 1
+}
+
+used='|'
+success=0
+for ((i=0;i<count;i++)); do
+  key=${keys[$i]}; port=${ports[$i]}; found=''
+  for country in "${candidates[@]}"; do
+    [[ "$used" == *"|$country|"* ]] && continue
+    echo "Testing $country for SOCKS $port..."
+    sed -i "s/^LOC_${key}=.*/LOC_${key}=${country}/" .env
+    sed -i "s/^PORT_${key}=.*/PORT_${key}=${port}/" .env
+    docker compose up -d --force-recreate "vpn-${key,,}" "socks-${key,,}" >/dev/null 2>&1 || true
+    if wait_healthy "nord-socks-${key,,}"; then
+      found="$country"; used="${used}${country}|"; success=$((success+1))
+      echo "OK: SOCKS 127.0.0.1:$port -> $country"
+      break
+    fi
+    echo "Failed: $country; trying next country..."
+    docker compose rm -sf "socks-${key,,}" "vpn-${key,,}" >/dev/null 2>&1 || true
+  done
+  [[ -n "$found" ]] || echo "WARNING: no healthy country found for port $port"
+done
+
+echo
+echo "Healthy locations: $success/$count"
+docker compose ps
