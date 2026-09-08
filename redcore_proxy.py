@@ -234,13 +234,12 @@ def provider_members(subs: list[Subscription]) -> list[str]:
 
 
 def provider_delays(subs: list[Subscription]) -> dict[str, int]:
-    """Test provider proxies through the standard selectable group API.
+    """Run a real SOCKS/TLS request through each selectable provider member.
 
-    Recent Mihomo versions keep provider proxies out of /proxies. Their
-    provider-healthcheck routes also use the provider's internal proxy name,
-    which can differ after override.additional-prefix. TITAN_ALL exposes every
-    provider member as a normal selectable option, so it is stable across both
-    API variants.
+    The ``/delay`` API can return HTTP 503 for provider-backed selections even
+    when the selected node itself is usable.  ``titan-control`` is routed only
+    to TITAN_ALL, so selecting one member and testing that local SOCKS listener
+    verifies the actual path a final port will use.
     """
     all_names = provider_members(subs)
     delays: dict[str, int] = {}
@@ -248,13 +247,17 @@ def provider_delays(subs: list[Subscription]) -> dict[str, int]:
     for index, proxy in enumerate(all_names, 1):
         try:
             api('/proxies/' + group, method='PUT', body={'name': proxy})
-            path = '/proxies/' + group + '/delay?' + urllib.parse.urlencode({'timeout': TIMEOUT * 1000, 'url': TEST_URL, 'expected': 204})
-            data = api(path, timeout=TIMEOUT + 5)
-            delay_value = data.get('delay')
-            if isinstance(delay_value, int) and delay_value > 0:
-                delays[proxy] = delay_value
+            # Give Mihomo a moment to apply the selector change before the
+            # SOCKS handshake begins.  This is deliberately serial: the
+            # control listener has one selector and must not mix two nodes.
+            time.sleep(0.08)
+            ok, latency_ms, message = socks_http_test(CONTROL_PORT)
+            if ok and latency_ms is not None:
+                delays[proxy] = latency_ms
+            else:
+                logging.info('real SOCKS test %s failed: %s', proxy, message)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
-            logging.info('delay test %s failed: %s', proxy, error)
+            logging.info('selector test %s failed: %s', proxy, error)
         if index % 10 == 0:
             logging.info('tested %d/%d provider proxies', index, len(all_names))
     return delays
