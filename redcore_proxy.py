@@ -169,10 +169,15 @@ def make_config(subs: list[Subscription], selected: list[str] | None = None) -> 
     return '\n'.join(lines) + '\n'
 
 
-def api(path: str, timeout: int = 8) -> dict[str, Any]:
-    request = urllib.request.Request(API + path, headers={'Accept': 'application/json'})
+def api(path: str, timeout: int = 8, method: str = 'GET', body: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = json.dumps(body).encode('utf-8') if body is not None else None
+    headers = {'Accept': 'application/json'}
+    if payload is not None:
+        headers['Content-Type'] = 'application/json'
+    request = urllib.request.Request(API + path, data=payload, method=method, headers=headers)
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode('utf-8'))
+        raw = response.read()
+        return json.loads(raw.decode('utf-8')) if raw else {}
 
 
 def restart_mihomo(subs: list[Subscription], selected: list[str] | None = None) -> None:
@@ -217,32 +222,29 @@ def provider_members(subs: list[Subscription]) -> list[str]:
 
 
 def provider_delays(subs: list[Subscription]) -> dict[str, int]:
-    """Provider proxies are not in /proxies; use their dedicated delay endpoint."""
-    all_names = provider_members(subs)
-    tasks: list[tuple[str, str]] = []
-    for name in all_names:
-        for sub in subs:
-            if name.startswith(sub.provider + '::'):
-                tasks.append((sub.provider, name))
-                break
+    """Test provider proxies through the standard selectable group API.
 
-    def test_one(task: tuple[str, str]) -> tuple[str, int | None]:
-        provider, proxy = task
-        path = '/providers/proxies/' + urllib.parse.quote(provider, safe='') + '/' + urllib.parse.quote(proxy, safe='') + '/healthcheck?'
-        path += urllib.parse.urlencode({'timeout': TIMEOUT * 1000, 'url': TEST_URL, 'expected': 204})
+    Recent Mihomo versions keep provider proxies out of /proxies. Their
+    provider-healthcheck routes also use the provider's internal proxy name,
+    which can differ after override.additional-prefix. TITAN_ALL exposes every
+    provider member as a normal selectable option, so it is stable across both
+    API variants.
+    """
+    all_names = provider_members(subs)
+    delays: dict[str, int] = {}
+    group = urllib.parse.quote('TITAN_ALL', safe='')
+    for index, proxy in enumerate(all_names, 1):
         try:
+            api('/proxies/' + group, method='PUT', body={'name': proxy})
+            path = '/proxies/' + group + '/delay?' + urllib.parse.urlencode({'timeout': TIMEOUT * 1000, 'url': TEST_URL, 'expected': 204})
             data = api(path, timeout=TIMEOUT + 5)
             delay_value = data.get('delay')
-            return proxy, delay_value if isinstance(delay_value, int) and delay_value > 0 else None
+            if isinstance(delay_value, int) and delay_value > 0:
+                delays[proxy] = delay_value
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
-            logging.info('health-check %s failed: %s', proxy, error)
-            return proxy, None
-
-    delays: dict[str, int] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(tasks)))) as pool:
-        for name, value in pool.map(test_one, tasks):
-            if value is not None:
-                delays[name] = value
+            logging.info('delay test %s failed: %s', proxy, error)
+        if index % 10 == 0:
+            logging.info('tested %d/%d provider proxies', index, len(all_names))
     return delays
 
 

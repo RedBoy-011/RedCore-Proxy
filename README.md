@@ -33,13 +33,16 @@ titan
 یا خط فرمان:
 
 ```bash
-titan subs add 'Khosrow' 'https://raw.githubusercontent.com/ThomasJasperthecat/sub/main/sublist1.txt'
+# این مقادیر را با نام و لینک خودتان جایگزین کنید.
+titan subs add 'نام ساب' 'https://example.com/your-subscription'
 titan test-subs
 titan refresh
 titan status
 titan socks-test 10801
 titan json
 ```
+
+نصب‌کننده هیچ لینک سابی اضافه نمی‌کند. هر ساب فقط با دستور `titan subs add` یا گزینهٔ «افزودن ساب» ثبت می‌شود.
 
 ## فایل‌های سرور
 
