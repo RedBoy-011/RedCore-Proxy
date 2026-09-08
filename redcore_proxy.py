@@ -26,6 +26,7 @@ SUBS, CONFIG, SANAEI, STATUS = ETC/'subs.txt', ETC/'mihomo.yaml', ETC/'sanaei.js
 PROVIDERS, LOG = ETC/'providers', Path('/var/log/titan/refresh.log')
 API = 'http://127.0.0.1:19090'
 PORT_BASE, MAX_NODES = 10801, 8
+CONTROL_PORT = 10799
 TEST_URL, TIMEOUT = 'https://www.gstatic.com/generate_204', 12
 
 
@@ -151,7 +152,17 @@ def make_config(subs: list[Subscription], selected: list[str] | None = None) -> 
                 '    proxies:',
                 f'      - {yaml_quote(proxy)}',
             ]
-    lines += ['listeners:' if selected else 'listeners: []']
+    # Mihomo exits cleanly when no inbound listener exists. This localhost-only
+    # control listener keeps the API alive while provider proxies are tested.
+    lines += [
+        'listeners:',
+        '  - name: titan-control',
+        '    type: socks',
+        '    listen: 127.0.0.1',
+        f'    port: {CONTROL_PORT}',
+        '    udp: false',
+        '    users: []',
+    ]
     if selected:
         for index, _proxy in enumerate(selected, 1):
             lines += [
@@ -163,6 +174,7 @@ def make_config(subs: list[Subscription], selected: list[str] | None = None) -> 
                 '    users: []',
             ]
     lines += ['rules:']
+    lines += ['  - IN-NAME,titan-control,TITAN_ALL']
     if selected:
         lines += [f'  - IN-NAME,titan-socks-{index},TITAN_PIN_{index}' for index in range(1, len(selected) + 1)]
     lines += ['  - MATCH,TITAN_ALL']
