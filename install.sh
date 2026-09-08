@@ -14,8 +14,9 @@ apt-get install -y git ca-certificates curl
 
 if [[ -d "$BASE_DIR/.git" ]]; then
   cd "$BASE_DIR"
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    git stash push -u -m "RedSocKs5 automatic backup $(date +%Y%m%d-%H%M%S)" || true
+  if [[ -n "$(git status --porcelain 2>/dev/null | grep -v '^?? ' || true)" ]]; then
+    # Keep untracked private files such as .env on the server.
+    git stash push -m "RedSocKs5 automatic backup $(date +%Y%m%d-%H%M%S)" || true
   fi
   git pull --ff-only origin main
 else
