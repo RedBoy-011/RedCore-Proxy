@@ -5,11 +5,24 @@ APP=redcore-proxy
 [ "${EUID:-$(id -u)}" -eq 0 ] || { echo 'Run as root.'; exit 1; }
 
 install_packages() {
+  # Do not run apt update merely for the sake of it.  A server can have an
+  # unrelated, broken third-party repository (for example an old Docker repo)
+  # while every dependency required by RedCore is already installed.
+  local missing=()
+  command -v python3 >/dev/null 2>&1 || missing+=(python3)
+  command -v curl >/dev/null 2>&1 || missing+=(curl)
+  command -v jq >/dev/null 2>&1 || missing+=(jq)
+  command -v unzip >/dev/null 2>&1 || missing+=(unzip)
+  [ -e /etc/ssl/certs/ca-certificates.crt ] || missing+=(ca-certificates)
+  [ "${#missing[@]}" -eq 0 ] && return
   if command -v apt-get >/dev/null; then
-    apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl jq unzip ca-certificates
+    if ! apt-get update; then
+      echo 'apt update به‌دلیل یک repository خارجی ناموفق است. ابتدا آن repository را اصلاح یا موقتاً غیرفعال کنید.' >&2
+      exit 1
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
   elif command -v dnf >/dev/null; then
-    dnf install -y python3 curl jq unzip ca-certificates
+    dnf install -y "${missing[@]}"
   else
     echo 'Ubuntu/Debian یا Fedora/RHEL پشتیبانی می‌شود.'; exit 1
   fi
