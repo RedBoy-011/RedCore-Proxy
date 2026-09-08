@@ -216,16 +216,34 @@ def provider_members(subs: list[Subscription]) -> list[str]:
     return last
 
 
-def delay(proxy: str) -> tuple[str, int | None, str | None]:
-    path = '/proxies/' + urllib.parse.quote(proxy, safe='') + '/delay?' + urllib.parse.urlencode({'timeout': TIMEOUT * 1000, 'url': TEST_URL, 'expected': 204})
-    try:
-        data = api(path, timeout=TIMEOUT + 5)
-        value = data.get('delay')
-        if isinstance(value, int) and value > 0:
-            return proxy, value, None
-        return proxy, None, 'تاخیر معتبر برنگشت'
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
-        return proxy, None, str(error)
+def provider_delays(subs: list[Subscription]) -> dict[str, int]:
+    """Provider proxies are not in /proxies; use their dedicated delay endpoint."""
+    all_names = provider_members(subs)
+    tasks: list[tuple[str, str]] = []
+    for name in all_names:
+        for sub in subs:
+            if name.startswith(sub.provider + '::'):
+                tasks.append((sub.provider, name))
+                break
+
+    def test_one(task: tuple[str, str]) -> tuple[str, int | None]:
+        provider, proxy = task
+        path = '/providers/proxies/' + urllib.parse.quote(provider, safe='') + '/' + urllib.parse.quote(proxy, safe='') + '/healthcheck?'
+        path += urllib.parse.urlencode({'timeout': TIMEOUT * 1000, 'url': TEST_URL, 'expected': 204})
+        try:
+            data = api(path, timeout=TIMEOUT + 5)
+            delay_value = data.get('delay')
+            return proxy, delay_value if isinstance(delay_value, int) and delay_value > 0 else None
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
+            logging.info('health-check %s failed: %s', proxy, error)
+            return proxy, None
+
+    delays: dict[str, int] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, max(1, len(tasks)))) as pool:
+        for name, value in pool.map(test_one, tasks):
+            if value is not None:
+                delays[name] = value
+    return delays
 
 
 def recv_exact(sock: socket.socket, count: int) -> bytes:
@@ -318,16 +336,15 @@ def refresh(quiet: bool = False) -> int:
             print('هیچ نودی توسط Mihomo بارگذاری نشد.')
         return 0
     if not quiet:
-        print(f'--- مرحله ۲: تست API واقعی Mihomo برای {len(names)} نود ---')
-    tested: list[tuple[str, int]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(20, len(names))) as pool:
-        for name, ms, error in pool.map(delay, names):
-            if ms is not None:
-                tested.append((name, ms))
-                if not quiet:
-                    print(f'✓ {name} | {source_of(name, subs)} | {ms}ms')
-            elif not quiet:
-                print(f'✗ {name} | {source_of(name, subs)} | {error}')
+        print(f'--- مرحله ۲: health-check واقعی Mihomo برای {len(names)} نود ---')
+    delays = provider_delays(subs)
+    tested: list[tuple[str, int]] = [(name, delays[name]) for name in names if name in delays]
+    if not quiet:
+        for name in names:
+            if name in delays:
+                print(f'✓ {name} | {source_of(name, subs)} | {delays[name]}ms')
+            else:
+                print(f'✗ {name} | {source_of(name, subs)} | health-check ناموفق')
     tested.sort(key=lambda item: item[1])
     candidates = [name for name, _ in tested[:MAX_NODES]]
     if not quiet:
